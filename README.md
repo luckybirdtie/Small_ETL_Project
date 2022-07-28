@@ -1,2 +1,2 @@
-# Small_ETL_Project
-Just a ETL practice project
+# Xetra_ETL_Project
+Just an ETL practice project
