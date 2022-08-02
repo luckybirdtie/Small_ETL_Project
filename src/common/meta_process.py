@@ -1,17 +1,105 @@
 """
-Methods for processing meta file. 
+Methods for processing meta file.
 """
+from datetime import datetime, timedelta
+import collections
+
+import pandas as pd
+from src.common.constants import MetaProcessFormat
+from src.common.s3 import S3BucketConnector
+from src.common.custom_exceptions import WrongMetaFileException
+
 
 class MetaProcess():
     """
     class for meta file processing
     """
 
-    #A static method does not receive an implicit first argument. A static method is also a method #that is bound to the class and not the object of the class. This method can’t access or modify #the class state. It is present in a class because it makes sense for the method to be present #in class. It is generally used to create utility functions.
+    #A static method does not receive an implicit first argument.
+    #A static method is also a method that is bound to the class and not the object of the class.
+    #This method can’t access or modify the class state.
+    #It is present in a class because it makes sense for the method to be present in class.
+    #It is generally used to create utility functions.
     @staticmethod
-    def update_meta_file():
-        pass
+    def update_meta_file(extract_date_list: list, meta_key: str, s3_bucket_meta: S3BucketConnector):
+        """
+        Update the meta file to record the date of files that are processed, and the date of processing. 
+
+        :param extract_date_list: the list of dates of which files are processed
+        :param meta_key: key of the meta file in S3
+        :param s3_bucket_meta: S3BucketConnector for the bucket containing the meta file
+        """
+        #Create an empty DataFrame having the same columns as in the target meta file
+        df_new = pd.DataFrame(columns = [
+            MetaProcessFormat.META_DATE_COL.value,
+            MetaProcessFormat.META_PROCESSED_DATE_COL.value])
+        #Fill in the date col with the extract date list
+        df_new[MetaProcessFormat.META_DATE_COL.value] = extract_date_list
+        # Fill in the process date col with today
+        df_new[MetaProcessFormat.META_PROCESSED_DATE_COL.value] = \
+            datetime.today().strftime(MetaProcessFormat.META_PROCESS_DATE_FORMAT.value)
+        # Construct the new data frame to save
+        try:
+            # When meta file exists, conflate the new dataframe with the existing one
+            df_old = s3_bucket_meta.read_csv_to_df(meta_key)
+            if collections.Counter(df_old.columns) != collections.Counter(df_new.columns):
+                raise WrongMetaFileException
+            df_all = pd.concat(df_old, df_new)
+        except s3_bucket_meta.session.client('s3').exceptions.NoSuchKey:
+            # When meta file not exist, i.e first time saving the meta file, just use the new data frame
+            df_all = df_new
+        # Write to S3
+        s3_bucket_meta.write_df_to_s3(df_all, meta_key, MetaProcessFormat.META_FILE_FORMAT.value)
 
     @staticmethod
-    def return_date_list():
-        pass
+    def return_date_list(first_date: str, meta_key: str, s3_bucket_meta: S3BucketConnector):
+        """
+        Create a list of dates based on the input first_date and the already
+        processed dates in the meta file
+
+        :param: first_date -> the earliest date Xetra data should be processed
+        :param: meta_key -> key of the meta file in the S3 bucket
+        :param: s3_bucket_meta -> S3BucketConnector for the bucket.
+
+        returns:
+          min_date: first date that should be processed
+          return_date_list: list of all dates from min_date till today
+        """
+        start = datetime.strptime(first_date,
+                                  MetaProcessFormat.META_DATE_FORMAT.value)\
+                                      .date() - timedelta(days=1)
+        today = datetime.today().date()
+        try:
+            # If meta file exists create return_date_list using the content of the meta file
+            # Reading meta file
+            df_meta = s3_bucket_meta.read_csv_to_df(meta_key)
+            # Create a list of dates from first_date untill today
+            dates = [start + timedelta(days=x) for x in range(0, (today - start).days + 1)]
+            # Creating set of all dates in meta file
+            src_dates = set(pd.to_datetime(
+              df_meta[MetaProcessFormat.META_DATE_COL.value]
+              ).dt.date)
+            dates_missing = set(dates[1:]) - src_dates
+            if dates_missing:
+                # Determining the earliest date that should be extracted
+                min_date = min(set(dates[1:]) - src_dates) - timedelta(days=1)
+                # Creating a list of dates from min_date untill today
+                return_min_date = (min_date + timedelta(days=1))\
+                    .strftime(MetaProcessFormat.META_DATE_FORMAT.value)
+                return_dates = [
+                    date.strftime(MetaProcessFormat.META_DATE_FORMAT.value) \
+                        for date in dates if date >= min_date
+                        ]
+            else:
+                # Setting values for the earliest date and the list of dates
+                return_dates = []
+                return_min_date = datetime(2200, 1, 1).date()\
+                    .strftime(MetaProcessFormat.META_DATE_FORMAT.value)
+        except s3_bucket_meta.session.client('s3').exceptions.NoSuchKey:
+            # No meta file found -> creating a date list from first_date - 1 day untill today
+            return_min_date = first_date
+            return_dates = [
+              (start + timedelta(days=x)).strftime(MetaProcessFormat.META_DATE_FORMAT.value) \
+              for x in range(0, (today - start).days + 1)
+              ]
+        return return_min_date, return_dates

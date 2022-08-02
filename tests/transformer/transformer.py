@@ -1,7 +1,4 @@
-"""
-ETL class and functions
-"""
-
+"""Xetra ETL Component"""
 import logging
 from datetime import datetime
 from typing import NamedTuple
